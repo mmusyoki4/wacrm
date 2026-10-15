@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS mpesa_callback_events (
   processed boolean NOT NULL DEFAULT false,
   received_at timestamptz NOT NULL DEFAULT now()
 );
+-- Protect payment data from cross-account access.
+ALTER TABLE public.mpesa_payments
+  ENABLE ROW LEVEL SECURITY;
 
-CREATE INDEX IF NOT EXISTS idx_mpesa_callback_checkout
-  ON mpesa_callback_events (checkout_request_id);
+ALTER TABLE public.mpesa_callback_events
+  ENABLE ROW LEVEL SECURITY;
+
+-- Business members can view payments belonging to their account.
+CREATE POLICY "Account members can view their M-Pesa payments"
+  ON public.mpesa_payments
+  FOR SELECT
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.profiles p
+      WHERE p.user_id = auth.uid()
+        AND p.account_id = mpesa_payments.account_id
+    )
+  );
