@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS mpesa_payments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL,
+  account_id uuid NOT NULL REFERENCES public.accounts(id) ON DELETE RESTRICT,
   checkout_request_id text UNIQUE,
   merchant_request_id text,
   mpesa_receipt_number text UNIQUE,
