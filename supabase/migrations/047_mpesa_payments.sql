@@ -48,8 +48,10 @@ ALTER TABLE public.mpesa_callback_events
   ENABLE ROW LEVEL SECURITY;
 
 -- Business members can view payments belonging to their account.
-CREATE POLICY "Account members can view their M-Pesa paymentsp"DROP POLICY IF EXISTS "Account members can view their M-Pesa payments"
+DROP POLICY IF EXISTS "Account members can view their M-Pesa payments"
   ON public.mpesa_payments;
+
+CREATE POLICY "Account members can view their M-Pesa payments"
   ON public.mpesa_payments
   FOR SELECT
   TO authenticated
