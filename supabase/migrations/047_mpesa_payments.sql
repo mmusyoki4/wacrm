@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS mpesa_callback_events (
   processed boolean NOT NULL DEFAULT false,
   received_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_mpesa_callback_events_checkout
+  ON mpesa_callback_events (checkout_request_id);
 -- Protect payment data from cross-account access.
 ALTER TABLE public.mpesa_payments
   ENABLE ROW LEVEL SECURITY;
