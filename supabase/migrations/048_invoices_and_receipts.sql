@@ -1,4 +1,5 @@
 
+
 -- M-BizLipa billing tables
 -- Migration 048: invoices, payments, allocations and receipts
 -- Do not run until reviewed and backed up.
@@ -80,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.payments (
   status text NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'confirmed', 'failed', 'refunded')),
   reference text,
-  mpesa_payment_id uuid,
+  mpesa_payment_id uuid UNIQUE,
   received_at timestamptz,
   recorded_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -108,6 +109,70 @@ CREATE TABLE IF NOT EXISTS public.payment_allocations (
     REFERENCES public.invoices(id, account_id)
     ON DELETE RESTRICT
 );
+
+CREATE OR REPLACE FUNCTION public.validate_mbizlipa_allocation()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+DECLARE
+  payment_total numeric(12,2);
+  allocated_payment numeric(12,2);
+  invoice_total numeric(12,2);
+  allocated_invoice numeric(12,2);
+BEGIN
+  SELECT p.amount INTO payment_total
+  FROM public.payments p
+  WHERE p.id = NEW.payment_id
+    AND p.account_id = NEW.account_id
+    AND p.status = 'confirmed';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Allocations require a confirmed payment';
+  END IF;
+
+  SELECT COALESCE(SUM(pa.amount), 0)
+    INTO allocated_payment
+  FROM public.payment_allocations pa
+  WHERE pa.payment_id = NEW.payment_id
+    AND pa.account_id = NEW.account_id
+    AND (TG_OP = 'INSERT' OR pa.id <> NEW.id);
+
+  IF allocated_payment + NEW.amount > payment_total THEN
+    RAISE EXCEPTION 'Allocations cannot exceed the confirmed payment amount';
+  END IF;
+
+  SELECT i.total INTO invoice_total
+  FROM public.invoices i
+  WHERE i.id = NEW.invoice_id
+    AND i.account_id = NEW.account_id
+    AND i.status <> 'void';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Invoice not found or is void';
+  END IF;
+
+  SELECT COALESCE(SUM(pa.amount), 0)
+    INTO allocated_invoice
+  FROM public.payment_allocations pa
+  WHERE pa.invoice_id = NEW.invoice_id
+    AND pa.account_id = NEW.account_id
+    AND (TG_OP = 'INSERT' OR pa.id <> NEW.id);
+
+  IF allocated_invoice + NEW.amount > invoice_total THEN
+    RAISE EXCEPTION 'Allocations cannot exceed the invoice total';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_validate_mbizlipa_allocation
+BEFORE INSERT OR UPDATE ON public.payment_allocations
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_mbizlipa_allocation();
+  
 
 -- 5. Customer-facing receipts.
 -- Different from the Safaricom M-Pesa receipt number.
@@ -151,42 +216,100 @@ CREATE INDEX IF NOT EXISTS idx_invoice_receipts_account
   ON public.invoice_receipts (account_id, issued_at DESC);
 
 -- Receipt creation is allowed only for confirmed payments.
-CREATE OR REPLACE FUNCTION public.validate_mbizlipa_receipt()
+CREATE OR REPLACE FUNCTION public.validate_mbizlipa_allocation()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = ''
 AS $$
 DECLARE
-  payment_status text;
-  payment_amount numeric(12,2);
+  payment_total numeric(12,2);
+  allocated_payment numeric(12,2);
+  invoice_total numeric(12,2);
+  allocated_invoice numeric(12,2);
 BEGIN
-  SELECT p.status, p.amount
-    INTO payment_status, payment_amount
+  SELECT p.amount INTO payment_total
   FROM public.payments p
   WHERE p.id = NEW.payment_id
-    AND p.account_id = NEW.account_id;
+    AND p.account_id = NEW.account_id
+    AND p.status = 'confirmed';
 
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Payment not found for this account';
+    RAISE EXCEPTION 'Allocations require a confirmed payment';
   END IF;
 
-  IF payment_status <> 'confirmed' THEN
-    RAISE EXCEPTION 'Receipts require a confirmed payment';
+  SELECT COALESCE(SUM(pa.amount), 0)
+    INTO allocated_payment
+  FROM public.payment_allocations pa
+  WHERE pa.payment_id = NEW.payment_id
+    AND pa.account_id = NEW.account_id
+    AND (TG_OP = 'INSERT' OR pa.id <> NEW.id);
+
+  IF allocated_payment + NEW.amount > payment_total THEN
+    RAISE EXCEPTION 'Allocations cannot exceed the confirmed payment amount';
   END IF;
 
-  IF NEW.amount > payment_amount THEN
-    RAISE EXCEPTION 'Receipt amount cannot exceed payment amount';
+  SELECT i.total INTO invoice_total
+  FROM public.invoices i
+  WHERE i.id = NEW.invoice_id
+    AND i.account_id = NEW.account_id
+    AND i.status <> 'void';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Invoice not found or is void';
+  END IF;
+
+  SELECT COALESCE(SUM(pa.amount), 0)
+    INTO allocated_invoice
+  FROM public.payment_allocations pa
+  WHERE pa.invoice_id = NEW.invoice_id
+    AND pa.account_id = NEW.account_id
+    AND (TG_OP = 'INSERT' OR pa.id <> NEW.id);
+
+  IF allocated_invoice + NEW.amount > invoice_total THEN
+    RAISE EXCEPTION 'Allocations cannot exceed the invoice total';
   END IF;
 
   RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER trg_validate_mbizlipa_receipt
-BEFORE INSERT OR UPDATE ON public.invoice_receipts
+CREATE TRIGGER trg_validate_mbizlipa_allocation
+BEFORE INSERT OR UPDATE ON public.payment_allocations
 FOR EACH ROW
-EXECUTE FUNCTION public.validate_mbizlipa_receipt();
+EXECUTE FUNCTION public.validate_mbizlipa_allocation();
+
+
+  RETURN NEW;
+
+
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+  IF NEW.status <> 'confirmed'
+     AND EXISTS (
+       SELECT 1
+       FROM public.invoice_receipts r
+       WHERE r.payment_id = NEW.id
+         AND r.account_id = NEW.account_id
+     )
+  THEN
+    RAISE EXCEPTION
+      'A payment with an issued receipt cannot be marked failed, refunded or pending';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_prevent_invalid_receipt_payment_status
+BEFORE UPDATE OF status ON public.payments
+FOR EACH ROW
+WHEN (OLD.status IS DISTINCT FROM NEW.status)
+EXECUTE FUNCTION public.prevent_invalid_receipt_payment_status();
 
 -- Enable row-level security.
 ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
@@ -251,10 +374,6 @@ CREATE POLICY "Billing agents can create payments"
 ON public.payments FOR INSERT TO authenticated
 WITH CHECK (public.is_account_member(account_id, 'agent'));
 
-CREATE POLICY "Billing agents can update payments"
-ON public.payments FOR UPDATE TO authenticated
-USING (public.is_account_member(account_id, 'agent'))
-WITH CHECK (public.is_account_member(account_id, 'agent'));
 
 -- Allocations: restrict access to the matching business account.
 CREATE POLICY "Billing members can view allocations"
@@ -271,4 +390,6 @@ ON public.invoice_receipts FOR SELECT TO authenticated
 USING (public.is_account_member(account_id, 'viewer'));
 
 COMMIT;
+
+
 
