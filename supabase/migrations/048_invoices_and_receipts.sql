@@ -66,7 +66,72 @@ CREATE TABLE IF NOT EXISTS public.invoice_items (
     CHECK (discount_amount >= 0),
   line_total numeric(12,2) NOT NULL CHECK (line_total >= 0),
   created_at timestamptz NOT NULL DEFAULT now()
-);
+);-- Keep invoice totals synchronized with line items.
+CREATE OR REPLACE FUNCTION public.recalculate_mbizlipa_invoice_totals()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+DECLARE
+  target_invoice_id uuid;
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND OLD.invoice_id IS DISTINCT FROM NEW.invoice_id THEN
+
+    UPDATE public.invoices i
+    SET
+      subtotal = totals.subtotal,
+      tax_total = totals.tax_total,
+      discount_total = totals.discount_total,
+      total = totals.total,
+      updated_at = now()
+    FROM (
+      SELECT
+        COALESCE(SUM(quantity * unit_price), 0)::numeric(12,2) AS subtotal,
+        COALESCE(SUM(tax_amount), 0)::numeric(12,2) AS tax_total,
+        COALESCE(SUM(discount_amount), 0)::numeric(12,2) AS discount_total,
+        COALESCE(SUM(line_total), 0)::numeric(12,2) AS total
+      FROM public.invoice_items
+      WHERE invoice_id = OLD.invoice_id
+    ) totals
+    WHERE i.id = OLD.invoice_id
+      AND i.status = 'draft';
+
+    target_invoice_id := NEW.invoice_id;
+  ELSIF TG_OP = 'DELETE' THEN
+    target_invoice_id := OLD.invoice_id;
+  ELSE
+    target_invoice_id := NEW.invoice_id;
+  END IF;
+
+  UPDATE public.invoices i
+  SET
+    subtotal = totals.subtotal,
+    tax_total = totals.tax_total,
+    discount_total = totals.discount_total,
+    total = totals.total,
+    updated_at = now()
+  FROM (
+    SELECT
+      COALESCE(SUM(quantity * unit_price), 0)::numeric(12,2) AS subtotal,
+      COALESCE(SUM(tax_amount), 0)::numeric(12,2) AS tax_total,
+      COALESCE(SUM(discount_amount), 0)::numeric(12,2) AS discount_total,
+      COALESCE(SUM(line_total), 0)::numeric(12,2) AS total
+    FROM public.invoice_items
+    WHERE invoice_id = target_invoice_id
+  ) totals
+  WHERE i.id = target_invoice_id
+    AND i.status = 'draft';
+
+  RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER trg_recalculate_mbizlipa_invoice_totals
+AFTER INSERT OR UPDATE OR DELETE ON public.invoice_items
+FOR EACH ROW
+EXECUTE FUNCTION public.recalculate_mbizlipa_invoice_totals();
 
 -- 3. Payment records
 CREATE TABLE IF NOT EXISTS public.payments (
@@ -390,6 +455,8 @@ ON public.invoice_receipts FOR SELECT TO authenticated
 USING (public.is_account_member(account_id, 'viewer'));
 
 COMMIT;
+
+
 
 
 
