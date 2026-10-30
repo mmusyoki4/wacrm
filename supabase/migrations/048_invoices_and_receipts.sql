@@ -174,6 +174,21 @@ CREATE TABLE IF NOT EXISTS public.payment_allocations (
     REFERENCES public.invoices(id, account_id)
     ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS public.payment_allocations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL
+    REFERENCES public.accounts(id) ON DELETE RESTRICT,
+  payment_id uuid NOT NULL,
+  invoice_id uuid NOT NULL,
+  amount numeric(12,2) NOT NULL CHECK (amount > 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (payment_id, account_id)
+    REFERENCES public.payments(id, account_id)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (invoice_id, account_id)
+    REFERENCES public.invoices(id, account_id)
+    ON DELETE RESTRICT
+);
 
 CREATE OR REPLACE FUNCTION public.validate_mbizlipa_allocation()
 RETURNS trigger
